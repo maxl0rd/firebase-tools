@@ -158,3 +158,44 @@ async function pipeAsync(from: archiver.Archiver, to: fs.WriteStream): Promise<v
     to.on("error", reject);
   });
 }
+
+/** Files that mark the root of an Nx or Turborepo monorepo, the monorepos App Hosting supports. */
+const MONOREPO_CONFIG_FILES = ["nx.json", "turbo.json"] as const;
+
+/** Where to build an app. */
+export interface BuildDirectory {
+  /** The directory to build from. */
+  dir: string;
+  /** The app's folder in `dir`, with forward slashes. Empty if the app is `dir` itself. */
+  app: string;
+}
+
+/**
+ * Returns where to build an app, the way App Hosting's preparer decides it. An app in an Nx or
+ * Turborepo monorepo builds from the monorepo's root, so that it has the root's lockfile and shared
+ * packages. Any other app builds from its own folder. Only folders in the project count.
+ */
+export function buildDirectory(projectDir: string, rootDir = ""): BuildDirectory {
+  const appDir = path.join(projectDir, rootDir);
+  if (!isInDirectory(appDir, projectDir)) {
+    // The app is outside the project, so don't look for a monorepo above it.
+    return { dir: appDir, app: "" };
+  }
+  // Check the app's folder, then each folder above it, up to the project's root.
+  const appPath = path.relative(projectDir, appDir);
+  const folders = appPath ? appPath.split(path.sep) : [];
+  for (let depth = folders.length; depth >= 0; depth--) {
+    const dir = path.join(projectDir, ...folders.slice(0, depth));
+    if (MONOREPO_CONFIG_FILES.some((file) => fs.existsSync(path.join(dir, file)))) {
+      return { dir, app: folders.slice(depth).join("/") };
+    }
+  }
+  return { dir: appDir, app: "" };
+}
+
+/** Returns whether `child` is `parent` or a directory in it. */
+export function isInDirectory(child: string, parent: string): boolean {
+  const relative = path.relative(parent, child);
+  // path.relative returns an absolute path if there's no relative one, e.g. on another drive.
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}

@@ -87,7 +87,7 @@ describe("apphosting", () => {
         backendConfigs: {
           fooLocalBuild: {
             backendId: "fooLocalBuild",
-            rootDir: "/root",
+            rootDir: "monorepo/apps/web",
             ignore: [],
             localBuild: true,
           },
@@ -100,6 +100,9 @@ describe("apphosting", () => {
           fooLocalBuild: {
             outputFiles: ["./dist"],
             localBuildScratchDir: "/root/.local_build_fooLocalBuild",
+            // The build ran in the monorepo's root, so the upload is that folder.
+            buildDir: "/root/.local_build_fooLocalBuild/monorepo",
+            rootDirectory: "apps/web",
             buildConfig: {
               runCommand: "npm run build",
               env: [{ variable: "VAR1", value: "VALUE1" }],
@@ -132,7 +135,8 @@ describe("apphosting", () => {
           source: {
             locallyBuilt: {
               userStorageUri: "gs://bucket/foo-local-build.tar.gz",
-              rootDirectory: "/root",
+              // The app's folder in the upload, not in the project.
+              rootDirectory: "apps/web",
               runCommand: "npm run build",
               env: [{ variable: "VAR1", value: "VALUE1" }],
             },
@@ -159,6 +163,8 @@ describe("apphosting", () => {
           fooLocalBuild: {
             outputFiles: ["./dist"],
             localBuildScratchDir: "/root/.local_build_fooLocalBuild",
+            buildDir: "/root/.local_build_fooLocalBuild",
+            rootDirectory: "/root",
             buildConfig: {
               runCommand: "npm run build",
               env: [{ variable: "VAR1", value: "VALUE1" }],

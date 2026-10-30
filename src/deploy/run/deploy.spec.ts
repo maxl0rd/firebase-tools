@@ -11,7 +11,7 @@ import { Options } from "../../options";
 import * as apphostingPrepare from "../apphosting/prepare";
 import * as apphostingUtil from "../apphosting/util";
 import { ServiceDeploy } from "./args";
-import { buildDirectory, deploy, localBuildTemplate, revisionTemplate } from "./deploy";
+import { deploy, localBuildTemplate, revisionTemplate } from "./deploy";
 
 const NODEJS22 = "us-central1-docker.pkg.dev/serverless-runtimes/google-22/runtimes/nodejs22";
 const DEPLOY_MESSAGE = "firebase.google.com/deploy-message";
@@ -202,6 +202,7 @@ describe("run deploy", () => {
     const localWeb = { ...web, localBuild: true };
     let rmSyncStub: sinon.SinonStub;
     let validateNodeStub: sinon.SinonStub;
+    let prepareScratchStub: sinon.SinonStub;
     let localBuildStub: sinon.SinonStub;
     let tarArchiveStub: sinon.SinonStub;
 
@@ -209,7 +210,10 @@ describe("run deploy", () => {
       sinon.stub(fs, "mkdtempSync").returns(scratchDir);
       rmSyncStub = sinon.stub(fs, "rmSync");
       validateNodeStub = sinon.stub(localbuilds, "validateLocalBuildNodeVersion");
-      sinon.stub(apphostingPrepare, "prepareLocalBuildScratchDirectory").resolves();
+      // By default, web is in a Turborepo whose root is the project's, so it builds from the root.
+      prepareScratchStub = sinon
+        .stub(apphostingPrepare, "prepareLocalBuildScratchDirectory")
+        .resolves({ dir: scratchDir, app: "apps/web" });
       localBuildStub = sinon.stub(localbuilds, "localBuild").resolves({
         outputFiles: [".next"],
         buildConfig: { runCommand: "npm run start" },
@@ -235,12 +239,32 @@ describe("run deploy", () => {
         { runtime: { value: "nodejs22" } },
         "/project/apps/web",
       );
+      expect(prepareScratchStub).to.have.been.calledWithMatch("/project", scratchDir, {
+        rootDir: "apps/web",
+      });
       expect(localBuildStub).to.have.been.calledWithMatch(
         "my-project",
         scratchDir,
         {},
         { rootDir: "apps/web" },
       );
+      expect(rmSyncStub).to.have.been.calledWith(scratchDir);
+    });
+
+    it("builds an app that isn't in a monorepo from its own folder", async () => {
+      const appDir = path.join(scratchDir, "apps/web");
+      prepareScratchStub.resolves({ dir: appDir, app: "" });
+
+      await deployLocalBuild();
+
+      // GOOGLE_BUILDABLE is only set for an app in a subfolder of the folder that's built.
+      expect(localBuildStub).to.have.been.calledWithMatch(
+        "my-project",
+        appDir,
+        {},
+        { rootDir: "" },
+      );
+      expect(tarArchiveStub).to.have.been.calledWithMatch(sinon.match.any, appDir, [".next"]);
       expect(rmSyncStub).to.have.been.calledWith(scratchDir);
     });
 
@@ -302,72 +326,6 @@ describe("run deploy", () => {
       rmSyncStub.throws(new Error("EBUSY: resource busy or locked"));
 
       await expect(deployLocalBuild()).to.be.rejectedWith("next build failed");
-    });
-  });
-
-  describe("buildDirectory", () => {
-    /** Pretends that only these files exist. */
-    function withFiles(...files: string[]): void {
-      sinon.stub(fs, "existsSync").callsFake((file) => files.includes(file as string));
-    }
-
-    it("builds an app from its own folder if it isn't in a monorepo", () => {
-      withFiles(path.join("/project", "web", "package.json"));
-      expect(buildDirectory("/project", "web")).to.deep.equal({
-        dir: path.join("/project", "web"),
-        app: "",
-      });
-      expect(buildDirectory("/project")).to.deep.equal({ dir: path.join("/project"), app: "" });
-      expect(buildDirectory("/project", ".")).to.deep.equal({
-        dir: path.join("/project"),
-        app: "",
-      });
-    });
-
-    it("builds an app in a Turborepo or Nx monorepo from the monorepo's root", () => {
-      withFiles(path.join("/project", "turbo.json"));
-      expect(buildDirectory("/project", "apps/web")).to.deep.equal({
-        dir: path.join("/project"),
-        app: "apps/web",
-      });
-
-      sinon.restore();
-      withFiles(path.join("/project", "nx.json"));
-      expect(buildDirectory("/project", "apps/web")).to.deep.equal({
-        dir: path.join("/project"),
-        app: "apps/web",
-      });
-    });
-
-    it("uses the closest folder above the app with nx.json or turbo.json", () => {
-      withFiles(
-        path.join("/project", "turbo.json"),
-        path.join("/project", "monorepo", "turbo.json"),
-      );
-      expect(buildDirectory("/project", "monorepo/apps/web")).to.deep.equal({
-        dir: path.join("/project", "monorepo"),
-        app: "apps/web",
-      });
-    });
-
-    it("builds from the app's folder if the app is the monorepo's root", () => {
-      withFiles(path.join("/project", "apps/web", "nx.json"));
-      expect(buildDirectory("/project", "apps/web")).to.deep.equal({
-        dir: path.join("/project", "apps/web"),
-        app: "",
-      });
-    });
-
-    it("doesn't look for a monorepo outside the project", () => {
-      withFiles(path.join("/", "turbo.json"));
-      expect(buildDirectory("/project", "apps/web")).to.deep.equal({
-        dir: path.join("/project", "apps/web"),
-        app: "",
-      });
-      expect(buildDirectory("/project", "../other")).to.deep.equal({
-        dir: path.join("/project", "../other"),
-        app: "",
-      });
     });
   });
 
@@ -501,7 +459,12 @@ describe("run deploy", () => {
     describe("localBuildTemplate", () => {
       it("runs a local build's output with the build's start command", () => {
         // The command is split on whitespace, so stray spaces don't become empty arguments.
-        const build = { outputFiles: [".next"], runCommand: " npm  run start ", env: [] };
+        const build = {
+          buildDir: scratchDir,
+          outputFiles: [".next"],
+          runCommand: " npm  run start ",
+          env: [],
+        };
 
         const template = localBuildTemplate({ config: web, existing }, build, builtApp);
 
@@ -520,6 +483,7 @@ describe("run deploy", () => {
           ],
         });
         const build = {
+          buildDir: scratchDir,
           outputFiles: [".next"],
           env: [
             { name: "MODE", value: "development" },

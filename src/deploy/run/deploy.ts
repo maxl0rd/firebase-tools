@@ -14,7 +14,11 @@ import { logger } from "../../logger";
 import { Options } from "../../options";
 import { cloneDeep, logLabeledBullet } from "../../utils";
 import { prepareLocalBuildScratchDirectory } from "../apphosting/prepare";
-import { createLocalBuildTarArchive, createSourceDeployArchive } from "../apphosting/util";
+import {
+  buildDirectory,
+  createLocalBuildTarArchive,
+  createSourceDeployArchive,
+} from "../apphosting/util";
 import { Context, Payload, ServiceDeploy } from "./args";
 import { nonSecretValues, secretNames, toLocalBuildEnv } from "./buildEnv";
 import { FIREBASE_APP_ANNOTATION, mainContainer } from "./util";
@@ -29,25 +33,16 @@ const ROLLOUT_TIMEOUT_MS = 10 * 60 * 1000;
  */
 const NO_IMAGE = "scratch";
 
-/** Files that mark the root of an Nx or Turborepo monorepo, the monorepos App Hosting supports. */
-const MONOREPO_CONFIG_FILES = ["nx.json", "turbo.json"] as const;
-
 /** What a local build produced. */
 export interface LocalBuildOutput {
-  /** The built files to upload, relative to the scratch directory the build ran in. */
+  /** The folder the build ran in, in the scratch copy of the source. */
+  buildDir: string;
+  /** The built files to upload, relative to buildDir. */
   outputFiles: string[];
   /** The command that starts the app, e.g. "npm run start". */
   runCommand?: string;
   /** The env vars the app needs at runtime. */
   env: NonNullable<runv2.Container["env"]>;
-}
-
-/** Where a build on Cloud Build runs. */
-export interface BuildDirectory {
-  /** The directory to upload and build from. */
-  dir: string;
-  /** The app's folder in `dir`, with forward slashes. Empty if the app is `dir` itself. */
-  app: string;
 }
 
 /** Builds each service, locally or on Cloud Build, then rolls it out. */
@@ -76,30 +71,6 @@ async function deployRemoteBuild(
 }
 
 /**
- * Returns where to build the service on Cloud Build, the way App Hosting decides it. An app in an
- * Nx or Turborepo monorepo builds from the monorepo's root, so that it has the root's lockfile and
- * shared packages. Any other app builds from its own folder. Only folders in the project count.
- * Exported for testing.
- */
-export function buildDirectory(projectDir: string, rootDir = ""): BuildDirectory {
-  const appDir = path.join(projectDir, rootDir);
-  const appPath = path.relative(projectDir, appDir);
-  if (appPath === ".." || appPath.startsWith(`..${path.sep}`)) {
-    // The app is outside the project, so don't look for a monorepo above it.
-    return { dir: appDir, app: "" };
-  }
-  // Check the app's folder, then each folder above it, up to the project's root.
-  const folders = appPath ? appPath.split(path.sep) : [];
-  for (let depth = folders.length; depth >= 0; depth--) {
-    const dir = path.join(projectDir, ...folders.slice(0, depth));
-    if (MONOREPO_CONFIG_FILES.some((file) => fs.existsSync(path.join(dir, file)))) {
-      return { dir, app: folders.slice(depth).join("/") };
-    }
-  }
-  return { dir: appDir, app: "" };
-}
-
-/**
  * Builds the service on this machine, uploads the output, then rolls it out. Cloud Run runs the
  * output as is, so nothing is built on Cloud Build.
  */
@@ -115,7 +86,7 @@ async function deployLocalBuild(
   );
   try {
     const build = await buildLocally(context, options, svc, scratchDir);
-    const builtApp = await uploadBuiltApp(projectId, options, svc.config, scratchDir, build);
+    const builtApp = await uploadBuiltApp(projectId, options, svc.config, build);
     const message = options.message as string | undefined;
     const template = localBuildTemplate(svc, build, builtApp, message);
     svc.deployed = await rollOut(projectId, svc, template);
@@ -148,13 +119,19 @@ async function buildLocally(
         `included in the build output.`,
     );
   }
-  await prepareLocalBuildScratchDirectory(options.config.projectDir, scratchDir, cfg);
+  // Copies the whole project, and returns where App Hosting would build: the monorepo's root for an
+  // app in an Nx or Turborepo monorepo, or else the app's own folder.
+  const { dir, app } = await prepareLocalBuildScratchDirectory(
+    options.config.projectDir,
+    scratchDir,
+    cfg,
+  );
   const { outputFiles, buildConfig } = await localBuild(
     context.projectId,
-    scratchDir,
+    dir,
     toLocalBuildEnv(svc.buildEnv || {}),
     // Unlike App Hosting, Cloud Run doesn't ask users to confirm build secrets in local builds.
-    { rootDir: config.rootDir, allowLocalBuildSecrets: true },
+    { rootDir: app, allowLocalBuildSecrets: true },
   );
   // Keep the env vars that the app needs at runtime, not just during the build.
   const env = (buildConfig.env || [])
@@ -165,7 +142,7 @@ async function buildLocally(
         (!e.availability || e.availability.includes("RUNTIME")),
     )
     .map((e) => ({ name: e.variable, value: e.value! }));
-  return { outputFiles, runCommand: buildConfig.runCommand, env };
+  return { buildDir: dir, outputFiles, runCommand: buildConfig.runCommand, env };
 }
 
 /** Zips `dir`, the directory to build from, and uploads it to the region's source bucket. */
@@ -193,15 +170,15 @@ async function uploadBuiltApp(
   projectId: string,
   options: Options,
   config: RunSingle,
-  scratchDir: string,
   build: LocalBuildOutput,
 ): Promise<runv2.StorageSource> {
   const { serviceId, region } = config;
   const bucketName = await sourceBucket(projectId, options, region);
-  // The tarball is a tmp file, so it's deleted when the CLI exits.
+  // The tarball is a tmp file, so it's deleted when the CLI exits. Its root is the folder the build
+  // ran in, since the build's run command and output paths are relative to it.
   const archive = await createLocalBuildTarArchive(
     toAppHostingConfig(config),
-    scratchDir,
+    build.buildDir,
     build.outputFiles,
   );
   logLabeledBullet("run", `Uploading built app for service ${serviceId} in ${region}...`);

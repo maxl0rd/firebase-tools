@@ -55,6 +55,11 @@ function initializeContext(): Context {
           os.tmpdir(),
           `apphosting-local-build-fooLocalBuild-${expectedPathHash}`,
         ),
+        buildDir: path.join(
+          os.tmpdir(),
+          `apphosting-local-build-fooLocalBuild-${expectedPathHash}`,
+        ),
+        rootDirectory: "",
         buildConfig: {},
       },
     },
@@ -272,6 +277,30 @@ describe("apphosting", () => {
       await expect(deploy(context, opts)).to.be.rejectedWith(
         FirebaseError,
         "App Hosting local builds experiment is not enabled",
+      );
+    });
+
+    it("uploads a local build from the folder that the build ran in", async () => {
+      const context = initializeContext();
+      context.backendConfigs = { fooLocalBuild: context.backendConfigs["fooLocalBuild"] };
+      context.backendLocations = { fooLocalBuild: "us-central1" };
+      const buildDir = path.join(
+        context.backendLocalBuilds["fooLocalBuild"].localBuildScratchDir,
+        "web",
+      );
+      context.backendLocalBuilds["fooLocalBuild"].buildDir = buildDir;
+      getProjectNumberStub.resolves("000000000000");
+      upsertBucketStub.resolves("some-bucket");
+      createTarArchiveStub.resolves("path/to/foo-local-build-1234.tar.gz");
+      createReadStreamStub.returns("stream" as unknown as fs.ReadStream);
+      uploadObjectStub.resolves({ bucket: "some-bucket", object: "foo-local-build-1234" });
+
+      await deploy(context, opts);
+
+      expect(createTarArchiveStub).to.be.calledWithExactly(
+        context.backendConfigs["fooLocalBuild"],
+        buildDir,
+        ["./nextjs/standalone"],
       );
     });
   });

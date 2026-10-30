@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as fsAsync from "../../fsAsync";
-import { resolveIgnorePatterns } from "./util";
+import { BuildDirectory, buildDirectory, isInDirectory, resolveIgnorePatterns } from "./util";
 import {
   doSetupSourceDeploy,
   ensureAppHostingComputeServiceAccount,
@@ -233,21 +233,23 @@ export default async function (context: Context, options: Options): Promise<void
     );
 
     try {
-      await prepareLocalBuildScratchDirectory(rootDir, localBuildScratchDir, cfg);
+      const build = await prepareLocalBuildScratchDirectory(rootDir, localBuildScratchDir, cfg);
 
       const { outputFiles, buildConfig } = await localBuild(
         projectId,
-        localBuildScratchDir,
+        build.dir,
         buildEnv[cfg.backendId] || {},
         {
           nonInteractive: options.nonInteractive,
           allowLocalBuildSecrets: !!options.allowLocalBuildSecrets,
-          rootDir: cfg.rootDir,
+          rootDir: build.app,
         },
       );
       context.backendLocalBuilds[cfg.backendId] = {
         outputFiles,
         localBuildScratchDir,
+        buildDir: build.dir,
+        rootDirectory: build.app,
         buildConfig: {
           ...buildConfig,
           env: mergeEnvVars(buildConfig.env || [], runtimeEnv[cfg.backendId] || {}),
@@ -426,7 +428,12 @@ async function ensureAppHostingServiceAgentRoles(
 }
 
 /**
- * Prepares the scratch directory for local builds by copying non-ignored files.
+ * Prepares the scratch directory for local builds by copying non-ignored files, and returns where in
+ * it to build.
+ *
+ * The whole project is copied, like source deploys upload it. The build runs where App Hosting's
+ * builds do (see buildDirectory): in the monorepo's root for an app in an Nx or Turborepo monorepo,
+ * or else in the app's own folder. An app outside the project is copied on its own.
  *
  * NOTE ON FILE FILTERING:
  * For local builds, we apply all ignore filtering (user firebase.json ignores and .gitignore)
@@ -435,10 +442,14 @@ async function ensureAppHostingServiceAgentRoles(
  * source files that would be uploaded to Cloud Build.
  */
 export async function prepareLocalBuildScratchDirectory(
-  rootDir: string,
+  projectDir: string,
   localBuildScratchDir: string,
   cfg: AppHostingSingle,
-): Promise<void> {
+): Promise<BuildDirectory> {
+  const { dir, app } = buildDirectory(projectDir, cfg.rootDir);
+  // Copying the whole project, not just `dir`, keeps applying .gitignore files above `dir`.
+  const copyDir = isInDirectory(dir, projectDir) ? projectDir : dir;
+
   // Resolve ignores for local builds, including default node_modules ignore
   const ignore = resolveIgnorePatterns(cfg);
 
@@ -449,17 +460,18 @@ export async function prepareLocalBuildScratchDirectory(
 
   // Copy files respecting ignores
   const filesToCopy = await fsAsync.readdirRecursive({
-    path: rootDir,
+    path: copyDir,
     ignoreStrings: ignore,
     supportGitIgnore: true,
   });
 
   for (const file of filesToCopy) {
-    const relativePath = path.relative(rootDir, file.name);
+    const relativePath = path.relative(copyDir, file.name);
     const destPath = path.join(localBuildScratchDir, relativePath);
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
     fs.copyFileSync(file.name, destPath);
   }
+  return { dir: path.join(localBuildScratchDir, path.relative(copyDir, dir)), app };
 }
 
 /**

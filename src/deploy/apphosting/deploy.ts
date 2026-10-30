@@ -78,18 +78,21 @@ export default async function (context: Context, options: Options): Promise<void
       try {
         const isLocalBuild = cfg.localBuild;
         let outputFiles: string[] | undefined;
+        let buildDir: string | undefined;
         if (isLocalBuild) {
           experiments.assertEnabled("apphostinglocalbuilds", "App Hosting local builds");
           const localBuild = context.backendLocalBuilds[cfg.backendId];
           outputFiles = localBuild?.outputFiles;
           localBuildScratchDir = localBuild?.localBuildScratchDir;
-          if (!outputFiles || !localBuildScratchDir) {
+          buildDir = localBuild?.buildDir;
+          if (!outputFiles || !localBuildScratchDir || !buildDir) {
             throw new FirebaseError(`No local build output files found for ${cfg.backendId}`);
           }
         }
 
+        // A local build is uploaded from the folder it ran in, which its run command is relative to.
         const zippedSourcePath = isLocalBuild
-          ? await util.createLocalBuildTarArchive(cfg, localBuildScratchDir!, outputFiles ?? [])
+          ? await util.createLocalBuildTarArchive(cfg, buildDir!, outputFiles ?? [])
           : await util.createSourceDeployArchive(cfg, rootDir);
 
         logLabeledBullet(

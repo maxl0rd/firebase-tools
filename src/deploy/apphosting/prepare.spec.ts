@@ -17,6 +17,7 @@ import prepare, {
   injectEnvVarsFromApphostingConfig,
   injectAutoInitEnvVars,
   injectAngularEnvVars,
+  prepareLocalBuildScratchDirectory,
 } from "./prepare";
 import * as localbuilds from "../../apphosting/localbuilds";
 import * as managementApps from "../../management/apps";
@@ -161,6 +162,8 @@ describe("apphosting", () => {
           os.tmpdir(),
           `apphosting-local-build-foo-${expectedPathHash}`,
         ),
+        buildDir: path.join(os.tmpdir(), `apphosting-local-build-foo-${expectedPathHash}`),
+        rootDirectory: "",
         buildConfig,
       });
       expect(addServiceAccountToRolesStub).to.have.been.calledWith(
@@ -749,8 +752,99 @@ describe("apphosting", () => {
           os.tmpdir(),
           `apphosting-local-build-newly-created-backend-${expectedPathHash}`,
         ),
+        buildDir: path.join(
+          os.tmpdir(),
+          `apphosting-local-build-newly-created-backend-${expectedPathHash}`,
+        ),
+        rootDirectory: "",
         buildConfig,
       });
+    });
+
+    it("builds an app in a subfolder from that folder, in a copy of the whole project", async () => {
+      const optsWithLocalBuild = {
+        ...opts,
+        config: new Config({
+          apphosting: { backendId: "foo", rootDir: "web", ignore: [], localBuild: true },
+        }),
+      };
+      const context = initializeContext();
+      const localBuildStub = sinon.stub(localbuilds, "localBuild").resolves({
+        outputFiles: [".next/standalone"],
+        buildConfig: { runCommand: "node .next/standalone/server.js", env: [] },
+      });
+      listBackendsStub.onFirstCall().resolves({
+        backends: [
+          {
+            name: "projects/my-project/locations/us-central1/backends/foo",
+            runtime: { value: "nodejs22" },
+          },
+        ],
+      });
+
+      await prepare(context, optsWithLocalBuild);
+
+      const scratchDir = path.join(os.tmpdir(), `apphosting-local-build-foo-${expectedPathHash}`);
+      expect(fsAsync.readdirRecursive).to.have.been.calledWithMatch({ path: process.cwd() });
+      expect(localBuildStub).to.have.been.calledWithMatch(
+        "my-project",
+        path.join(scratchDir, "web"),
+        sinon.match.any,
+        { rootDir: "" },
+      );
+      expect(context.backendLocalBuilds["foo"]).to.deep.include({
+        localBuildScratchDir: scratchDir,
+        buildDir: path.join(scratchDir, "web"),
+        rootDirectory: "",
+      });
+    });
+  });
+
+  describe("prepareLocalBuildScratchDirectory", () => {
+    const projectDir = path.join("/project");
+    const scratchDir = path.join("/tmp", "apphosting-local-build-web");
+    const web: AppHostingSingle = { backendId: "web", rootDir: "web", ignore: [] };
+
+    it("copies the whole project, so its .gitignore files apply, and builds the app's folder", async () => {
+      (fsAsync.readdirRecursive as sinon.SinonStub).resolves([
+        { name: path.join(projectDir, "web", "package.json"), mode: 0o644 },
+      ]);
+
+      const build = await prepareLocalBuildScratchDirectory(projectDir, scratchDir, web);
+
+      expect(fsAsync.readdirRecursive).to.have.been.calledWithMatch({
+        path: projectDir,
+        supportGitIgnore: true,
+      });
+      expect(fs.copyFileSync).to.have.been.calledWith(
+        path.join(projectDir, "web", "package.json"),
+        path.join(scratchDir, "web", "package.json"),
+      );
+      expect(build).to.deep.equal({ dir: path.join(scratchDir, "web"), app: "" });
+    });
+
+    it("builds an app in a Turborepo or Nx monorepo from the monorepo's root", async () => {
+      (fs.existsSync as sinon.SinonStub).callsFake(
+        (file: fs.PathLike) => file === path.join(projectDir, "monorepo", "turbo.json"),
+      );
+
+      const build = await prepareLocalBuildScratchDirectory(projectDir, scratchDir, {
+        ...web,
+        rootDir: "monorepo/apps/web",
+      });
+
+      expect(fsAsync.readdirRecursive).to.have.been.calledWithMatch({ path: projectDir });
+      expect(build).to.deep.equal({ dir: path.join(scratchDir, "monorepo"), app: "apps/web" });
+    });
+
+    it("copies an app outside the project on its own", async () => {
+      const build = await prepareLocalBuildScratchDirectory(projectDir, scratchDir, {
+        ...web,
+        rootDir: "../other",
+      });
+
+      expect(fsAsync.readdirRecursive).to.have.been.calledWithMatch({ path: path.join("/other") });
+      expect(build).to.deep.equal({ dir: scratchDir, app: "" });
     });
   });
 
